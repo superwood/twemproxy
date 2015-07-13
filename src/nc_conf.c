@@ -1528,6 +1528,185 @@ conf_set_listen(struct conf *cf, struct command *cmd, void *conf)
 
     return CONF_OK;
 }
+char *
+conf_add_server_group(struct conf *cf, struct command *cmd, void *conf)
+{
+    rstatus_t status;
+    struct array *a;
+    struct string *value;
+    struct conf_server *field;
+    uint8_t *p, *q, *start;
+    uint8_t *pname, *addr, *port, *weight, *name;
+    uint32_t k, delimlen, pnamelen, addrlen, portlen, weightlen, namelen;
+    char delim[] = " ,::";
+
+    p = conf;
+    a = (struct array *)(p + cmd->offset);
+
+    field = array_push(a);
+    if (field == NULL) {
+        return CONF_ERROR;
+    }
+
+    conf_server_init(field);
+
+    value = array_top(&cf->arg);
+
+    /* parse "hostname:port:weight,hostname:port:weight [name]"  master and slave or "/path/unix_socket:weight [name]" from the end */
+    p = value->data + value->len - 1;
+    start = value->data;
+    addr = NULL;
+    addrlen = 0;
+    weight = NULL;
+    weightlen = 0;
+    port = NULL;
+    portlen = 0;
+    name = NULL;
+    namelen = 0;
+
+    delimlen = value->data[0] == '/' ? 2 : 3;
+	//get server name
+	char delim_name = delim[0];
+	q = nc_strrchr(p, start, delim_name);
+	if( q == NULL){
+		return CONF_ERROR;		
+	}
+	name = q + 1 ;
+
+	//get host list
+	delim_name = ',';
+	char delim_host[] = "::";
+	p = q - 1;
+	uint8_t*  host_start;
+	while( true){
+		q = nc_strrchr(p, start, delim_name);
+		if( NULL == q){
+			break;
+		}
+		host_start = q;
+		p = q - 1;
+		
+		for(k=0; k<sizeof(delim_host);k++){
+			q =  nc_strrchr(p, host_start, delim_host[k]);
+			if( NULL == q){
+				break;
+			}
+			switch(k){
+				case 0:
+					name = q + 1;
+			}
+		}
+
+
+
+	}
+
+
+    for (k = 0; k < sizeof(delim); k++) {
+        q = nc_strrchr(p, start, delim[k]); //find the delim[k] from [p--->start]
+        if (q == NULL) {
+            if (k == 0) {//the servername is a optional
+                /*
+                 * name in "hostname:port:weight [name]" format string is
+                 * optional
+                 */
+                continue;
+            }
+            break;
+        }
+
+        switch (k) {//replical name
+        case 0:
+            name = q + 1;
+            namelen = (uint32_t)(p - name + 1);
+            break;
+
+        case 1:
+            weight = q + 1;
+            weightlen = (uint32_t)(p - weight + 1);
+            break;
+
+        case 2:
+            port = q + 1;
+            portlen = (uint32_t)(p - port + 1);
+            break;
+
+        default:
+            NOT_REACHED();
+        }
+
+        p = q - 1;
+    }
+
+    if (k != delimlen) {
+        return "has an invalid \"hostname:port:weight [name]\"or \"/path/unix_socket:weight [name]\" format string";
+    }
+
+    pname = value->data;
+    pnamelen = namelen > 0 ? value->len - (namelen + 1) : value->len;
+    status = string_copy(&field->pname, pname, pnamelen);
+    if (status != NC_OK) {
+        array_pop(a);
+        return CONF_ERROR;
+    }
+
+    addr = start;
+    addrlen = (uint32_t)(p - start + 1);
+
+    field->weight = nc_atoi(weight, weightlen);
+    if (field->weight < 0) {
+        return "has an invalid weight in \"hostname:port:weight [name]\" format string";
+    } else if (field->weight == 0) {
+        return "has a zero weight in \"hostname:port:weight [name]\" format string";
+    }
+
+    if (value->data[0] != '/') {
+        field->port = nc_atoi(port, portlen);
+        if (field->port < 0 || !nc_valid_port(field->port)) {
+            return "has an invalid port in \"hostname:port:weight [name]\" format string";
+        }
+    }
+
+    if (name == NULL) {
+        /*
+         * To maintain backward compatibility with libmemcached, we don't
+         * include the port as the part of the input string to the consistent
+         * hashing algorithm, when it is equal to 11211.
+         */
+        if (field->port == CONF_DEFAULT_KETAMA_PORT) {
+            name = addr;
+            namelen = addrlen;
+        } else {
+            name = addr;
+            namelen = addrlen + 1 + portlen;
+        }
+    }
+
+    status = string_copy(&field->name, name, namelen);
+    if (status != NC_OK) {
+        return CONF_ERROR;
+    }
+
+    status = string_copy(&field->addrstr, addr, addrlen);
+    if (status != NC_OK) {
+        return CONF_ERROR;
+    }
+
+    /*
+     * The address resolution of the backend server hostname is lazy.
+     * The resolution occurs when a new connection to the server is
+     * created, which could either be the first time or every time
+     * the server gets re-added to the pool after an auto ejection
+     */
+
+    field->valid = 1;
+
+    return CONF_OK;
+}
+
+
+
+
 
 char *
 conf_add_server(struct conf *cf, struct command *cmd, void *conf)
